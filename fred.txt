@@ -1,0 +1,662 @@
+;inputs: reg DE (example value 1D02)
+$61EA XOR A
+      LD L, A
+      PUSH DE  ; no need to push/pop, DE doesn't change
+      LD A, D
+      SRL A
+      RR L
+      SRL A
+      RR L
+      SRL A
+      RR L
+      OR $E0
+      LD H, A
+      LD A, L
+      OR E
+      LD L, A
+      LD A, (HL) ;example value in HL: (E3A2) -> 0, (E3A3) -> 4
+      POP DE
+$6202 RET
+
+
+;params: DE,example value $0801 (D: pixel row, E: column)
+;uses: A, HL
+;returns: HL, example value: $4021 (video mem address)
+;tstates: 41132-40943
+$62D3 LD A, D
+      LD HL, $4000
+      AND $C0
+      SRL A
+      SRL A
+      SRL A
+      ADD A, H
+      LD H, A
+      LD A, D
+      AND $07
+      ADD A, H
+      LD H, A
+      LD A, D
+      AND $38
+      SLA A
+      SLA A
+      LD L, A
+      LD A, E
+      AND $1F
+      ADD A, L
+      LD L, A
+$62F3 RET
+
+
+
+62F4: LD HL, $5800
+62F7: LD DE, $5801
+62FA: LD BC, $02FF
+62FD: LD (HL), $32
+62FF: LDIR
+6301: LD B, $18
+6303: LD A, $55
+6305: LD HL, $4000
+6308: LD DE, $4001
+630B: LD C, $08
+630D: LD (HL), A
+630E: PUSH BC
+630F: LD BC, $001F
+6312: LDIR
+6314: POP BC
+6315: INC HL
+6316: INC DE
+6317: DEC C
+6318: JR NZ, $630D
+631A: CPL
+631B: DJNZ $630B
+631D: LD B, $16
+631F: LD HL, $5821
+6322: LD DE, $5822
+6325: PUSH BC
+6326: LD (HL), $06
+6328: LD BC, $0017
+632B: LDIR
+632D: LD BC, $0009
+6330: ADD HL, BC
+6331: EX DE, HL
+6332: ADD HL, BC
+6333: EX DE, HL
+6334: POP BC
+6335: DJNZ $6325
+6337: LD B, $B0
+6339: LD DE, $0801
+633C: PUSH BC
+633D: PUSH DE
+633E: CALL $62D3
+6341: PUSH HL
+6342: POP DE
+6343: INC DE
+6344: LD BC, $0017
+6347: LD (HL), $00
+6349: LDIR
+634B: POP DE
+634C: INC D
+634D: POP BC
+634E: DJNZ $633C
+6350: RET
+
+
+
+
+;
+;Main video loop. Draw a screen based on representation of 2-byte cells corresponding to 8*8 pixel screen cells.
+;
+$6391 LD HL,($638F) ;reg HL points to top-left cell
+$6394 LD DE, $0801  ;initialize pixel row and column pointers. reg D - initial pixel row (8), reg E - column (1)
+      LD C, $16     ;height of game screen, number of 8-pixel rows
+
+;outermost loop
+$6399 PUSH DE       
+      PUSH HL
+      LD B, $18     ;width of game screen, number of cells in row
+
+;outer loop, go by columns from left to right in one 8-pixel row
+$639D PUSH BC
+      PUSH DE      
+      LD E, (HL)   ; get first byte of a cell value
+      INC HL       ; 
+      LD D, (HL)   ; get second byte of a cell value
+      INC HL       ; move to next cell
+;top 3 bits of cell code is a paper color for screen block, remaining bits, if multiplied by 8, are offset to 8 bytes of pixels
+;to extract this info from cell code, it's value is shifted left 3 times
+      XOR A
+      LD B, $03   
+$63A6 SLA E       
+      RL D        
+      RL A        
+      DJNZ $63A6  
+; after this loop, reg A is paper color, reg DE is offset to pixel data
+      PUSH HL      ; store cell pointer, since we need HL 
+      LD HL, $9400 ; base of pixel data, each unit is 8 bytes
+      ADD HL, DE   ; add offset, now HL point to pixel data
+
+      POP BC        
+      POP DE       ; this is what we actually want to restore - screen row and column pointer
+      PUSH DE      ; but still want it to be preserved for later
+      PUSH BC       
+
+      PUSH HL      ; save source pixel pointer
+
+      PUSH AF
+      CALL $62D3   ; calculate video mem address into HL based on screen row and column values from DE
+      POP AF
+      PUSH HL      ; save video mem addr
+      CALL $6442   ; update from reg A an attribute area corresponding to video mem addr in HL
+      POP HL       ; restore video mem 
+
+      LD B, $08    ; loop counter, will draw 8 bytes on screen, one 8x8 box, each byte is row of 8 pixels
+      POP DE       ; restore pointer to source pixels
+;innermost loop, transfer pixels into video mem
+$63C5 LD A, (DE)   ; get pixels byte from source
+      LD (HL), A   ; put pixels byte into video mem
+      INC DE       ; to next pixels byte
+      INC H        ; down to next video mem row
+$63C9 DJNZ $63C5   ; loop 8 times 
+
+$63CB POP HL       ; restore source cell pointer
+      POP DE       ; restore screen pixel row and column pointers
+      INC E        ; move to next column to the right
+      POP BC       ; restore row and column counters
+$63CF DJNZ $639D   ; loop to fill next screen cell
+
+$63D1 POP HL       ; restore cell pointer at the begining of a row
+      LD DE, $0040 ; how many bytes to add to get to cell which is 1 row down
+      ADD HL, DE   ; now HL points to the leftmost cell of next row of cells
+
+      POP DE       ; restore screen pixel row and column pointers
+      LD A, D
+      ADD A, $08   ;move to next pixel row
+      LD D, A
+
+      DEC C        ;number of remaining rows
+      JR NZ, $6399 ;outermost loop, go and fill next row
+$63DE RET
+
+
+
+63DF: LD HL, ($638F)
+63E2: LD DE, ($6514)
+63E6: ADD HL, DE
+63E7: LD ($643C), HL
+63EA: LD ($6438), HL
+63ED: LD HL, $6518
+63F0: LD ($6436), HL
+63F3: LD HL, ($6516)
+63F6: LD B, $04
+63F8: SLA L
+63FA: RL H
+63FC: DJNZ $63F8
+63FE: LD DE, $C000
+6401: ADD HL, DE
+6402: LD ($643A), HL
+6405: CALL $6409
+6408: RET
+
+6409: LD HL, ($6436)
+640C: PUSH HL
+640D: LD HL, ($643C)  ; sprite source ?
+6410: LD C, $04
+6412: LD B, $04
+6414: LD E, (HL)
+6415: INC HL
+6416: LD D, (HL)
+6417: EX (SP), HL
+6418: LD (HL), E
+6419: INC HL
+641A: LD (HL), D
+641B: INC HL
+641C: EX (SP), HL
+641D: DEC HL
+641E: LD DE, ($643A)
+6422: LD (HL), E
+6423: INC HL
+6424: LD (HL), D
+6425: INC HL
+6426: INC DE
+6427: LD ($643A), DE
+642B: DJNZ $6414
+642D: LD DE, $0038
+6430: ADD HL, DE
+6431: DEC C
+6432: JR NZ, $6412
+6434: POP HL
+6435: RET 
+
+
+
+;input: HL (video mem addr, example value $4021), A (attribute value?? example value 05)
+$6442 PUSH AF
+      LD A, H
+      AND $18   ;keep only those 2 bits
+      SRA A
+      SRA A
+      SRA A
+      ADD A, $58
+      LD H, A   ; $5821, attribute addr?
+      POP AF
+      OR $40  ; always set this bit (brightness ?)
+      LD (HL), A
+$6453 RET      
+
+
+
+
+
+
+$6460 LD DE, ($6649)   ; example value: 1F05
+      DEC D
+      DEC D
+      DEC E
+      DEC E
+      DEC E
+      LD HL, $ECC0
+      LD C, $06
+$646E PUSH DE
+      PUSH HL
+      LD B, $08
+      PUSH BC
+      LD A, D ;
+      CP $21
+      JR C, $6486
+      CP $80
+      JR C, $6481
+      LD BC, $E078
+      JR $64A4
+$6481 LD BC, $C08C
+$6484 JR $64A4
+$6486 LD A, E
+6487: CP $20
+6489: JR C, $6492
+648B: JR NZ, $6481
+648D: LD BC, $A03C
+6490: JR $64A4
+
+$6492 PUSH HL
+$6493 CALL $61EA ;get block code
+      SLA A ; index = blockcode*2
+      LD HL, $64D3 ; base
+      ADD A, L
+      LD L, A  ;add index to base
+      JR NC, $64A0 ;check for overflow
+      INC H ; do it if overflow
+
+;now HL contains pointer to block info  (2 bytes)
+$64A0 LD C, (HL) ;read first byte of block info
+      INC HL
+      LD B, (HL) ;read second byte of block info
+      POP HL
+
+$64A4 PUSH DE
+      PUSH HL
+      PUSH BC
+      POP DE
+      LD C, $05
+
+;outer loop
+$64AA PUSH HL
+      LD B, $04 ;cells counter
+;innermost loop, horizontal cell codes for block
+$64AD LD (HL), E  ;example values: HL: $ECC0, DE : 0000 (block number?)
+      INC HL   ;maybe just INC L +++++ it works!
+      LD (HL), D
+      INC HL   ;maybe just INC L +++++ it works!
+      INC DE
+64B2: DJNZ $64AD
+      POP HL
+
+      PUSH DE
+      LD DE, $0040  ;move to next row. each row is $40 bytes, which is (num of blocks $08)*(block width $04)*(bytes per cell $02)
+      ADD HL, DE
+      POP DE
+
+      DEC C 
+      JR NZ, $64AA
+
+      POP HL ; value of HL before loops, example: $ECC0
+      LD DE, $0008 ; move 4 columns to right, since each cell is 2 bytes
+      ADD HL, DE
+      POP DE
+      INC E
+      POP BC
+      DJNZ $6472
+      POP HL
+      LD DE, $0140 ;move 5 rows below, since each row is $40 bytes, which is (num of blocks $08)*(block width $04)*(bytes per cell $02)
+      ADD HL, DE
+      POP DE
+      INC D
+      DEC C
+      JR NZ, $646E
+64D2: RET
+
+
+
+
+64E1: LD HL, ($6438)
+64E4: LD ($643E), HL
+64E7: LD HL, $6518
+64EA: LD ($6440), HL
+64ED: CALL $64F1
+64F0: RET
+
+;draw a sprite
+;params: 
+;  ($643E) 2 bytes, a destination in screen cells area
+;  ($6440) 2 bytes, a source
+64F1: LD HL, ($643E)  ;pointer where to put sprite cells, a pointer in cell area
+64F4: PUSH HL
+64F5: LD HL, ($6440)  ;a pointer to sprite source
+64F8: LD C, $04       ;sprite height
+64FA: LD B, $04       ;width of sprite
+64FC: LD E, (HL)      ;get first byte of sprite cell
+64FD: INC HL
+64FE: LD D, (HL)      ;get second byte of sprite cell
+64FF: INC HL
+;; greatest idea!!! instead of EX (SP),HL  use LDI!!!
+6500: EX (SP), HL     ;exchange source and destination pointers
+6501: LD (HL), E      ;put first byte of sprite
+6502: INC HL
+6503: LD (HL), D      ;put second byte of sprite
+6504: INC HL
+6505: EX (SP), HL
+6506: DJNZ $64FC
+6508: EX (SP), HL
+6509: LD DE, $0038    ;move to next row of screen cell area
+650C: ADD HL, DE
+650D: EX (SP), HL
+650E: DEC C
+650F: JR NZ, $64FA
+6511: POP HL
+6512: RET
+
+
+68F4: PUSH HL
+68F5: PUSH BC
+68F6: CALL $6409
+68F9: POP BC
+68FA: POP HL
+68FB: RET
+
+68FC: PUSH HL
+68FD: PUSH BC
+68FE: CALL $64F1
+6901: POP BC
+6902: POP HL
+6903: RET
+
+
+
+696D: LD A, ($68E8)
+6970: LD B, A
+6971: LD HL, $BF68
+6974: CALL $697B
+6977: JR NC, $69D7
+6979: JR $69A4
+697B: LD E, (HL)
+697C: INC HL
+697D: LD D, (HL)
+697E: INC HL
+697F: LD A, ($6629)
+6982: SUB $08
+6984: LD C, A
+6985: LD A, D
+6986: SUB C
+6987: LD D, A
+6988: CP $16
+698A: RET NC
+698B: LD A, ($6628)
+698E: SUB $0A
+6990: LD C, A
+6991: LD A, E
+6992: SUB C
+6993: LD E, A
+6994: CP $1A
+6996: RET NC
+6997: XOR A
+6998: SRL D
+699A: RRA
+699B: SRL D
+699D: RRA
+699E: SLA E
+69A0: ADD A, E
+69A1: LD E, A
+69A2: SCF
+69A3: RET
+69A4: PUSH HL
+69A5: LD HL, ($638F)
+69A8: ADD HL, DE
+69A9: LD ($643C), HL
+69AC: POP HL
+69AD: INC HL
+69AE: LD ($6436), HL
+69B1: DEC HL
+69B2: PUSH HL
+69B3: LD A, (HL)
+69B4: AND $03
+69B6: LD E, A
+69B7: LD D, $00
+69B9: SLA E
+69BB: LD HL, $6140
+69BE: ADD HL, DE
+69BF: LD ($643A), HL
+69C2: POP HL
+69C3: LD A, $01
+69C5: LD ($6411), A
+69C8: INC A
+69C9: LD ($6413), A
+69CC: CALL $68F4
+69CF: LD A, $04
+69D1: LD ($6411), A
+69D4: LD ($6413), A
+69D7: INC HL
+69D8: INC HL
+69D9: INC HL
+69DA: INC HL
+69DB: INC HL
+69DC: INC HL
+69DD: INC HL
+69DE: DJNZ $6974
+69E0: RET
+
+
+;draw 1x2 cell monster: droplet, hedgehog
+69E1: LD A, ($68E8)  ; example value: $28, number of monsters/hazards ?
+69E4: LD B, A
+69E5: LD HL, $C0C7
+69E8: LD E, (HL)     ; example value: $5A, coordinate?
+69E9: INC HL
+69EA: LD D, (HL)     ; example value: $3B, coordinate?
+69EB: INC HL
+69EC: LD A, ($6629)  ; example value: $72, screen offset?
+69EF: SUB $08
+69F1: LD C, A
+69F2: LD A, D
+69F3: SUB C
+69F4: LD D, A        ; example value: $D1
+69F5: CP $16
+69F7: JR NC, $6A33
+69F9: LD A, ($6628)  ;screen offset ?
+69FC: SUB $0A
+69FE: LD C, A
+69FF: LD A, E
+6A00: SUB C
+6A01: LD E, A
+6A02: CP $1A
+6A04: JR NC, $6A33
+6A06: XOR A          ;example value in DE: $0913
+6A07: SRL D
+6A09: RRA
+6A0A: SRL D
+6A0C: RRA
+6A0D: SLA E
+6A0F: ADD A, E
+6A10: LD E, A       ;example value in DE: $0266
+6A11: PUSH HL
+6A12: LD HL, ($638F)  ;example value: $EE44
+6A15: ADD HL, DE      
+6A16: LD ($643E), HL  ;sprite destination in cells area, param for proc $64F1
+6A19: POP HL
+6A1A: INC HL
+6A1B: LD ($6440), HL  ;sprite source, param for proc $64F1
+6A1E: DEC HL
+6A1F: LD A, $01
+6A21: LD ($64F9), A ;modify code in proc $64F1, sprite size
+6A24: INC A
+6A25: LD ($64FB), A ;modify code in proc $64F1, sprite size
+6A28: CALL $68FC    ;call a proc which then will call $64F1
+6A2B: LD A, $04
+6A2D: LD ($64F9), A ;restore default sprite size
+6A30: LD ($64FB), A
+6A33: INC HL
+6A34: INC HL
+6A35: INC HL
+6A36: INC HL
+6A37: INC HL
+6A38: INC HL
+6A39: INC HL
+6A3A: LD DE, $0012
+6A3D: AND A
+6A3E: SBC HL, DE
+6A40: DJNZ $69E8
+6A42: RET
+
+
+
+6BBF: LD A, ($68E9)
+6BC2: LD B, A
+6BC3: LD HL, $C184
+6BC6: CALL $697B
+6BC9: JR NC, $6BFE
+6BCB: PUSH HL
+6BCC: LD HL, ($638F)
+6BCF: ADD HL, DE
+6BD0: LD ($643C), HL
+6BD3: POP HL
+6BD4: INC HL
+6BD5: LD ($6436), HL
+6BD8: DEC HL
+6BD9: PUSH HL
+6BDA: LD A, (HL)
+6BDB: AND $07
+6BDD: LD E, A
+6BDE: LD D, $00
+6BE0: SLA E
+6BE2: LD HL, $8148
+6BE5: ADD HL, DE
+6BE6: LD ($643A), HL
+6BE9: POP HL
+6BEA: LD A, $01
+6BEC: LD ($6411), A
+6BEF: INC A
+6BF0: LD ($6413), A
+6BF3: CALL $68F4
+6BF6: LD A, $04
+6BF8: LD ($6411), A
+6BFB: LD ($6413), A
+6BFE: INC HL
+6BFF: INC HL
+6C00: INC HL
+6C01: INC HL
+6C02: INC HL
+6C03: INC HL
+6C04: INC HL
+6C05: DJNZ $6BC6
+6C07: RET
+
+
+
+;draw 3x4 cell monster: ghost, skeleton
+6CB1: LD A, ($68E7)  ; number of monsters, example value $0A
+6CB4: LD B, A
+6CB5: LD HL, $BD07
+6CB8: CALL $6D08     ;result: carry flag
+6CBB: JR NC, $6CEA   ; skip monster if he is not visible?
+6CBD: PUSH HL
+6CBE: LD HL, ($638F) ;screen offset ??
+6CC1: PUSH DE
+6CC2: LD DE, $00C2
+6CC5: AND A
+6CC6: SBC HL, DE
+6CC8: POP DE
+6CC9: ADD HL, DE
+6CCA: LD ($643E), HL ;sprite destination in cells area, param for proc $64F1
+6CCD: POP HL
+6CCE: INC HL
+6CCF: LD ($6440), HL ;sprite source
+6CD2: DEC HL
+6CD3: LD A, $03      ;sprite size
+6CD5: LD ($64FB), A
+6CD8: LD A, $3A      ;modify code in $64F1, how many bytes to add to move to next row of screen cells
+6CDA: LD ($650A), A
+6CDD: CALL $68FC
+6CE0: LD A, $04      ;restore default sprite size
+6CE2: LD ($64FB), A
+6CE5: LD A, $38      ;restore default value
+6CE7: LD ($650A), A
+6CEA: INC HL
+6CEB: INC HL
+6CEC: INC HL
+6CED: INC HL
+6CEE: INC HL
+6CEF: INC HL
+6CF0: INC HL
+6CF1: LD DE, $0026
+6CF4: AND A
+6CF5: SBC HL, DE
+6CF7: DJNZ $6CB8
+6CF9: RET
+
+;input: reg HL
+;output: reg DE, flag CF, reg HL
+6D08: LD E, (HL)
+6D09: INC HL
+6D0A: LD D, (HL)
+6D0B: INC HL
+6D0C: LD A, ($6629)
+6D0F: SUB $0B
+6D11: LD C, A
+6D12: LD A, D
+6D13: SUB C
+6D14: LD D, A
+6D15: CP $19
+6D17: RET NC
+6D18: LD A, ($6628)
+6D1B: SUB $0B
+6D1D: LD C, A
+6D1E: LD A, E
+6D1F: SUB C
+6D20: LD E, A
+6D21: CP $1B
+6D23: RET NC
+6D24: XOR A
+6D25: SRL D
+6D27: RRA
+6D28: SRL D
+6D2A: RRA
+6D2B: SLA E
+6D2D: ADD A, E
+6D2E: LD E, A
+6D2F: SCF
+6D30: RET
+
+
+78A5: CALL $9203
+78A8: CALL $696D
+78AB: CALL $6BBF
+78AE: CALL $6CFA
+78B1: LD A, ($6D91)
+78B4: AND A
+78B5: CALL NZ, $6E4E
+78B8: LD A, ($6D8D)
+78BB: AND A
+78BC: CALL NZ, $6F03
+78BF: LD A, ($6D92)
+78C2: AND A
+78C3: CALL NZ, $7006
+78C6: LD A, ($6D8F)
+78C9: AND A
+78CA: CALL NZ, $8F6C

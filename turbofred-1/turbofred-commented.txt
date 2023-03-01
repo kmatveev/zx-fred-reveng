@@ -1,0 +1,82 @@
+;reference snapshot: fred.sna
+;reference tape: fred.tap
+
+;screen drawing proc
+$6391 LD BC,($638F)    ;pointer to top-left visible cell
+      LD DE, $0801     ;D is pixel row number, E is column number
+
+      LD A, $16        ;counter for outer loop, number of 8-pixel rows
+;outer loop
+$639A PUSH AF          ;save counter
+      PUSH DE
+      CALL $62D3       ;calculate video-mem address into HL based on DE
+      CALL $6442       ;calculate attribute area address into IX based on HL, and copy screen addr into DE
+
+      LD A, $18        ;counter for inner loop, number of columns
+;inner loop
+$63A4 EX AF, AF'       ;save counter
+      LD A, (BC)       ;load first byte of cell code
+      LD L, A          ;copy here
+      INC BC
+      LD A, (BC)       ;load second byte of cell code
+      INC BC           ;now BC points to next cell
+      LD H, A          ;copy here
+      RLCA
+      RLCA
+      RLCA
+      AND $07
+      OR $40           ;now reg A contains inc color from high 3 bits of cell code
+      LD (IX+$00), A   ;set color for screen cell-block
+      ADD HL, HL       ;lower 13 bits of cell code contain offset of cell pixels divided by 8
+      ADD HL, HL
+      ADD HL, HL       ;get full offset by multiplying by 8, this makes high 3 bits to go away
+      LD A, H
+      ADD A, $94       ;pixel area base addres is $9400, we add it to pixels offset to get full pixels address
+      LD H, A
+
+      PUSH BC          ;store cell code pointer, since we will need BC
+      LD C, D          ;save high byte of video mem here
+      LD B, $08        ;loop counter
+;innermost loop
+$63C0 LD A, (HL)       ;get pixels byte from source
+      LD (DE), A       ;put pixels byte onto screen
+      INC L            ;move to next pixels source byte
+      INC D            ;move down to next video 9-pixels row
+      DJNZ $63C0       ;loop
+
+      LD D, C          ;restore DE so it is the same as before pixels copying
+      POP BC           ;restore cell code pointer
+      INC IX           ;move right to next attribute
+      INC E            ;move right to next video column
+      EX AF, AF'       ;restore loop counter
+      DEC A            ;decrement it
+      JR NZ, $63A4     ;loop
+
+      LD HL, $0010     ;this offset should be added to cell code 
+      ADD HL, BC       ;to get to beginning of next visible cell row
+      LD B, H
+      LD C, L
+      POP DE           ;restore row and column numbers
+      LD A, $08        ;move down to next 8-pixel column
+      ADD A, D
+      LD D, A
+      POP AF           ;restore outer column counter
+      DEC A            ;decrement it
+      JR NZ, $639A     ;loop to next row down
+$63DE RET
+
+
+;inputs: HL
+;outputs: IX,DE
+$6442 LD A,H
+      AND $18
+      SRA A
+      SRA A
+      SRA A
+      ADD A, $58
+      LD D, A
+      LD E, L
+      PUSH DE
+      POP IX
+      LD D,H
+$6453 RET 
