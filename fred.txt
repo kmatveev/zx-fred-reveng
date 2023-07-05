@@ -1,28 +1,30 @@
-;inputs: reg DE (example value 1D02)
+;get a level block code for provided level coordinates
+;current labyrinth is stored at $E000, it's dimensions are 32x32, from left to right, from top to bottom
+;inputs: reg D - level row (0 - 31), reg E - level column (0 - 31)
+;result: reg A - block value
 $61EA XOR A
       LD L, A
       PUSH DE  ; no need to push/pop, DE doesn't change
-      LD A, D
+      LD A, D  ; we will shift level row index by 3 bits to the left
       SRL A
       RR L
       SRL A
       RR L
       SRL A
       RR L
-      OR $E0
-      LD H, A
-      LD A, L
-      OR E
-      LD L, A
-      LD A, (HL) ;example value in HL: (E3A2) -> 0, (E3A3) -> 4
+      OR $E0  ; base address of level map is E000
+      LD H, A ; high byte of level element goes to H
+      LD A, L  
+      OR E    ; low byte of level element is composed of horizontal coord (lower 5 bits) 
+      LD L, A ; and 3 bits of vertical coord
+      LD A, (HL) ;get level element
       POP DE
 $6202 RET
 
-
-;params: DE,example value $0801 (D: pixel row, E: column)
+;calculate video mem addr corresponding to pixel row and num of byte in a row
+;params: reg D - pixel row, reg E - num of byte inside a row
 ;uses: A, HL
-;returns: HL, example value: $4021 (video mem address)
-;tstates: 41132-40943
+;returns: HL
 $62D3 LD A, D
       LD HL, $4000
       AND $C0
@@ -46,29 +48,31 @@ $62D3 LD A, D
       LD L, A
 $62F3 RET
 
+;
+;initial screen preparation?
+;
+$62F4 LD HL, $5800   ;start addr of screen attribute area
+      LD DE, $5801   ;next  addr
+      LD BC, $02FF   ;length of attr area - 1
+      LD (HL), $32   ;a value which will be set for all attributes
+      LDIR           ;do set 
+      LD B, $18
+      LD A, $55      ;value wich will be set for video-mem bytes
+      LD HL, $4000   ;start addr of video mem
+      LD DE, $4001   ;next addr
+      LD C, $08      ;how many lines
+$630D LD (HL), A     ;set initial byte
+      PUSH BC
+      LD BC, $001F   ;how many bytes will be set
+      LDIR           ;set remaining bytes
+      POP BC
+      INC HL
+      INC DE
+      DEC C          ;decrement line counter
+$6318 JR NZ, $630D   ;move to next line, if there are any remaining
+      CPL            ;for next lines, we switch bits of reg A, to get a checkered square
+$631B DJNZ $630B     ;another loop
 
-
-62F4: LD HL, $5800
-62F7: LD DE, $5801
-62FA: LD BC, $02FF
-62FD: LD (HL), $32
-62FF: LDIR
-6301: LD B, $18
-6303: LD A, $55
-6305: LD HL, $4000
-6308: LD DE, $4001
-630B: LD C, $08
-630D: LD (HL), A
-630E: PUSH BC
-630F: LD BC, $001F
-6312: LDIR
-6314: POP BC
-6315: INC HL
-6316: INC DE
-6317: DEC C
-6318: JR NZ, $630D
-631A: CPL
-631B: DJNZ $630B
 631D: LD B, $16
 631F: LD HL, $5821
 6322: LD DE, $5822
@@ -104,7 +108,7 @@ $62F3 RET
 
 
 ;
-;Main video loop. Draw a screen based on representation of 2-byte cells corresponding to 8*8 pixel screen cells.
+;Main video loop. Draw a screen based on encoded representation which uses 2-byte codes for 8*8 pixel screen cells.
 ;
 $6391 LD HL,($638F) ;reg HL points to top-left cell
 $6394 LD DE, $0801  ;initialize pixel row and column pointers. reg D - initial pixel row (8), reg E - column (1)
@@ -178,485 +182,1589 @@ $63D1 POP HL       ; restore cell pointer at the begining of a row
 $63DE RET
 
 
+; Draw player
+$63DF LD HL, ($638F)  ; top-left cell 
+      LD DE, ($6514)  ; player offset on screen ?
+      ADD HL, DE
+      LD ($643C), HL  ; screen area address, param for $6409
+      LD ($6438), HL  ; and we will memorize it for later when we will restore copied screen data
+      LD HL, $6518    ; static location where screen background will be stored so player will be drawn over it
+      LD ($6436), HL  ; buffer to store screen content
+      LD HL, ($6516)  ; player's current sprite code. Possible values are: [$0A - $13]
+      LD B, $04
+$63F8 SLA L
+      RL H            ; multiply by 16, since player's sprite is 4*4 cells
+      DJNZ $63F8
+      LD DE, $C000    ; sprite base
+      ADD HL, DE
+      LD ($643A), HL  ; source of sprite to be drawn
+      CALL $6409
+$6408 RET
 
-63DF: LD HL, ($638F)
-63E2: LD DE, ($6514)
-63E6: ADD HL, DE
-63E7: LD ($643C), HL
-63EA: LD ($6438), HL
-63ED: LD HL, $6518
-63F0: LD ($6436), HL
-63F3: LD HL, ($6516)
-63F6: LD B, $04
-63F8: SLA L
-63FA: RL H
-63FC: DJNZ $63F8
-63FE: LD DE, $C000
-6401: ADD HL, DE
-6402: LD ($643A), HL
-6405: CALL $6409
-6408: RET
+;
+;copy content of some rectangle of a screen into buffer, then draw a sprite over it
+;params:
+; ($643C) - 2 bytes, destination in encoded screen area
+; ($6436) - 2 bytes, location of a buffer where previous content of a screen will be stored
+; ($643A) - 2 bytes, source of a sprite to be drawn
+; code of this procedure is modified by a caller, it will change width and height by modifying bytes at $6411 and $6413
+;
+$6409 LD HL, ($6436)  ; address of a buffer where content of a screen will be stored
+      PUSH HL         ; will be saved on stack
+      LD HL, ($643C)  ; destination in encoded screen area 
+$6410 LD C, $04       ; height of sprite, this value at $6411 is modified by a caller
+$6412 LD B, $04       ; width of sprite, this value at $6413 is modified by a caller
+;first we copy content from the screen into a buffer
+$6414 LD E, (HL)      ; get first byte of cell code
+      INC HL
+      LD D, (HL)      ; get second byte of cell code
+      EX (SP), HL     ; now HL points to buffer area
+      LD (HL), E      ; store first byte of cell code
+      INC HL
+      LD (HL), D      ; store second byte of cell code
+      INC HL
+      EX (SP), HL     ; buffer pointer will go on stack, and address of encoded screen area goes into HL
+      DEC HL
+;now we draw sprite on screen
+$641E LD DE, ($643A)  ; cell of sprite to be drawn next time
+      LD (HL), E      ; we store it on encoded screen area
+      INC HL
+      LD (HL), D
+      INC HL
+      INC DE          ; increment cell code!
+$6427 LD ($643A), DE  ; memorize next cell code
+$642B DJNZ $6414      ; loop
+      LD DE, $0038    ; offset to be added to encoded screen area to move to next row. This value is modified by caller
+      ADD HL, DE      ; moving to next row
+      DEC C           ; decrement row counter
+      JR NZ, $6412    ; loop
+      POP HL
+$6435 RET 
 
-6409: LD HL, ($6436)
-640C: PUSH HL
-640D: LD HL, ($643C)  ; sprite source ?
-6410: LD C, $04
-6412: LD B, $04
-6414: LD E, (HL)
-6415: INC HL
-6416: LD D, (HL)
-6417: EX (SP), HL
-6418: LD (HL), E
-6419: INC HL
-641A: LD (HL), D
-641B: INC HL
-641C: EX (SP), HL
-641D: DEC HL
-641E: LD DE, ($643A)
-6422: LD (HL), E
-6423: INC HL
-6424: LD (HL), D
-6425: INC HL
-6426: INC DE
-6427: LD ($643A), DE
-642B: DJNZ $6414
-642D: LD DE, $0038
-6430: ADD HL, DE
-6431: DEC C
-6432: JR NZ, $6412
-6434: POP HL
-6435: RET 
+;  vars:
+;  
+;   ($6436) - 2 bytes, param for $6409, buffer where previous content of a screen will be stored
+;   ($6438) - 2 bytes, here a last screen position of player will be memorized (by $63DF) , so it could be restored late (by $64E1)
+;   ($643A) - 2 bytes, param for $6409, initial cell of a sprite to be drawn
+;   ($643C) - 2 bytes, param for $6409, destination in encoded screen area
+;
+;   params for $64F1
+;   ($643E) 2 bytes, a destination in screen cells area
+;   ($6440) 2 bytes, a source
 
 
 
-;input: HL (video mem addr, example value $4021), A (attribute value?? example value 05)
-$6442 PUSH AF
-      LD A, H
+;
+;calculate a attr address which corresponds to video-mem addr provided in HL, and update this attr byte with value from reg A
+;
+$6442 PUSH AF   ;memorize arg
+      LD A, H   ;attribute addr has the same low byte as video mem addr, so we only need to calculate high byte
       AND $18   ;keep only those 2 bits
       SRA A
       SRA A
       SRA A
-      ADD A, $58
-      LD H, A   ; $5821, attribute addr?
-      POP AF
-      OR $40  ; always set this bit (brightness ?)
-      LD (HL), A
+      ADD A,$58
+      LD H, A   ;now HL contains addr in attribute area
+      POP AF    ;restore arg
+      OR $40    ;always set this bit (brightness ?)
+      LD (HL),A ;update attribute
 $6453 RET      
 
 
+; multiply A by 5. 
+; This seem to be called only from $6E14, so could be inlined by replacing CALL with  [ ADD A,A  ADD A,A  ADD A,D]
+$6454 PUSH BC
+      LD B, A
+      AND A
+      JR Z, $645E
+      XOR A
+$645A ADD A, $05
+      DJNZ $645A
+$645E POP BC
+$645F RET
 
-
-
-
-$6460 LD DE, ($6649)   ; example value: 1F05
+;
+;generate encoded representation of visible part of current level, for subsequent rendering by main video loop
+;encoded representation will be generated for 6x8 blocks
+;each labyrinth block is converted into 5x4 cells of a same color
+;So whole representation takes 6*8*4*5 = 960 cells, which take 1920 ($780) bytes
+;Representation is stored at [$ECC0 - $F43F]
+;
+$6460 LD DE, ($6649) ; coordinates of player (center of a screen), reg D - vertical coord, reg E - horizontal coord
       DEC D
-      DEC D
+      DEC D          ; top visible row of labyrinth is current row - 2, it may be negative!
+      DEC E          
       DEC E
-      DEC E
-      DEC E
-      LD HL, $ECC0
-      LD C, $06
+      DEC E          ; left visible column of labyrinth is current column - 3
+      LD HL, $ECC0   ; base for encoded screen representation
+      LD C, $06      ; number of visible rows
+;outer loop, encode level rows
 $646E PUSH DE
       PUSH HL
-      LD B, $08
+      LD B, $08     ; number of visible columns
+;inner loop, encode level elements
       PUSH BC
-      LD A, D ;
-      CP $21
-      JR C, $6486
-      CP $80
-      JR C, $6481
-      LD BC, $E078
-      JR $64A4
-$6481 LD BC, $C08C
-$6484 JR $64A4
-$6486 LD A, E
-6487: CP $20
-6489: JR C, $6492
-648B: JR NZ, $6481
-648D: LD BC, $A03C
-6490: JR $64A4
+      LD A, D       ;checking vertical coord
+      CP $21        ;compare with level size + 1
+      JR C, $6486   ;it is below, ok, so it is possibly block of a labyrinth, let's check another coordinate
+      CP $80        ;otherwise, let's check if it greater than level's height, but not negative
+      JR C, $6481   ;if yes, then encode a sand block
+      LD BC, $E078  ;if here, then coord is negative, which means it's above the level, so we should encode stars
+      JR $64A4      ;jump directly to encoding
+$6481 LD BC, $C08C  ;code for a sand block
+      JR $64A4      ;jump directly to encoding
+$6486 LD A, E       ;check horizontal coord
+      CP $20        ;compare with level width
+      JR C, $6492   ;if lower, then it is a labyrinth item, let's get it
+      JR NZ, $6481  ;otherwize, it's a sand block
+      LD BC, $A03C  ;another kind of sand block
+      JR $64A4      ;jump directly to encoding
 
-$6492 PUSH HL
-$6493 CALL $61EA ;get block code
-      SLA A ; index = blockcode*2
-      LD HL, $64D3 ; base
+$6492 PUSH HL       ;save HL (a destination in encoded screen)
+$6493 CALL $61EA    ;get block code
+      SLA A         ;offset = blockcode*2, since each cell code is 2 bytes
+      LD HL, $64D3  ;base
       ADD A, L
-      LD L, A  ;add index to base
-      JR NC, $64A0 ;check for overflow
-      INC H ; do it if overflow
+      LD L, A       ;add offset to base
+      JR NC, $64A0  ;check for overflow
+      INC H         ;adjust high byte if overflow
 
-;now HL contains pointer to block info  (2 bytes)
-$64A0 LD C, (HL) ;read first byte of block info
+;now HL contains pointer to encoded info (2 bytes) of top-left cell of a block
+$64A0 LD C, (HL)    ;read first byte of block info
       INC HL
-      LD B, (HL) ;read second byte of block info
-      POP HL
+      LD B, (HL)    ;read second byte of block info
+      POP HL        ;restore HL (a destination in encoded screen)
 
-$64A4 PUSH DE
-      PUSH HL
-      PUSH BC
-      POP DE
-      LD C, $05
+$64A4 PUSH DE       ;store level coords
+      PUSH HL       ;store destination in encoded screen
+      PUSH BC       
+      POP DE        ;now DE has value of encoded block
 
-;outer loop
-$64AA PUSH HL
-      LD B, $04 ;cells counter
-;innermost loop, horizontal cell codes for block
-$64AD LD (HL), E  ;example values: HL: $ECC0, DE : 0000 (block number?)
-      INC HL   ;maybe just INC L +++++ it works!
-      LD (HL), D
-      INC HL   ;maybe just INC L +++++ it works!
-      INC DE
-64B2: DJNZ $64AD
-      POP HL
+;at this point DE contains code for top-left cell of a level block, and HL contain destination address for cells
+;all remaining cells for level block are just sequential increments starting from top-left cell
+      LD C, $05    ;each labyrinth block is 5 cells high
+;inner loop, go by cell rows for labyrinth block
+$64AA PUSH HL      ;store destination pointer for beginning of cell row for current block
+      LD B, $04    ;labyrinth blocks are 4 cells wide
+;innermost loop, go by cells in one row of a labyrinth block
+$64AD LD (HL), E   ;write low byte of encoded cell 
+      INC HL       ;increment destination address
+      LD (HL), D   ;write high byte of encoded cell
+      INC HL       ;increment destination address
+      INC DE       ;increment cell code
+$64B2 DJNZ $64AD   ;loop
+      POP HL       ;restore pointer so it points again to leftmost cell of current row
 
-      PUSH DE
-      LD DE, $0040  ;move to next row. each row is $40 bytes, which is (num of blocks $08)*(block width $04)*(bytes per cell $02)
-      ADD HL, DE
-      POP DE
+      PUSH DE      ;store cell code, since we need to use DE
+      LD DE, $0040 
+      ADD HL, DE   ;move to next row. each row is $40 bytes, which is (num of blocks $08)*(block width $04)*(bytes per cell $02)
+      POP DE       ;restore cell code
 
-      DEC C 
-      JR NZ, $64AA
+      DEC C        ;decrement cell rows counter
+      JR NZ, $64AA ;move to encode next cell row for current level block
 
-      POP HL ; value of HL before loops, example: $ECC0
-      LD DE, $0008 ; move 4 columns to right, since each cell is 2 bytes
-      ADD HL, DE
-      POP DE
-      INC E
-      POP BC
-      DJNZ $6472
-      POP HL
-      LD DE, $0140 ;move 5 rows below, since each row is $40 bytes, which is (num of blocks $08)*(block width $04)*(bytes per cell $02)
-      ADD HL, DE
-      POP DE
-      INC D
-      DEC C
-      JR NZ, $646E
-64D2: RET
+      POP HL       ;restore destination pointer for top-left cell of level block
+      LD DE, $0008 
+      ADD HL, DE   ;move 4 columns to right, since each cell is 2 bytes
+
+      POP DE       ;restore coordinates
+      INC E        ;move to next block to the right
+      POP BC       ;restore counters of level columns and rows
+      DJNZ $6472   ;decrement column counter and repeat if there are any left
+
+      POP HL       ;restore destination pointer of top-left cell of leftmost block on current row
+      LD DE, $0140 
+      ADD HL, DE   ;move 5 rows below, since each row is $40 bytes, which is (num of blocks $08)*(block width $04)*(bytes per cell $02)
+      POP DE       ;restore coordinates
+      INC D        ;move to next row
+      DEC C        ;decrement row counter
+      JR NZ, $646E ;repeat for next row, if there is any
+$64D2 RET
+
+; $64D3-$64E0  here stored initial cell codes corresponding to level blocks, 2 bytes for each block code. So for 7 possible block codes we have 7*2=14 bytes
+
+;restore level content behind player
+;
+$64E1 LD HL, ($6438)
+      LD ($643E), HL  ; address in screen representation area
+      LD HL, $6518
+      LD ($6440), HL  ; a source, an address of temp buffer where level background was stored earlier
+      CALL $64F1      ; do restore
+$64F0 RET
 
 
-
-
-64E1: LD HL, ($6438)
-64E4: LD ($643E), HL
-64E7: LD HL, $6518
-64EA: LD ($6440), HL
-64ED: CALL $64F1
-64F0: RET
-
-;draw a sprite
+;restore a previously stored rectangular part of visible area from buffer
 ;params: 
 ;  ($643E) 2 bytes, a destination in screen cells area
-;  ($6440) 2 bytes, a source
-64F1: LD HL, ($643E)  ;pointer where to put sprite cells, a pointer in cell area
-64F4: PUSH HL
-64F5: LD HL, ($6440)  ;a pointer to sprite source
-64F8: LD C, $04       ;sprite height
-64FA: LD B, $04       ;width of sprite
-64FC: LD E, (HL)      ;get first byte of sprite cell
-64FD: INC HL
-64FE: LD D, (HL)      ;get second byte of sprite cell
-64FF: INC HL
+;  ($6440) 2 bytes, a source, address which points to a sequence of 2-byte cell codes
+$64F1 LD HL, ($643E)  ;pointer where to put sprite cells, a pointer in cell area
+      PUSH HL         ;top of the stack will be used as an exchanged temporary storage, so we put destination addr
+      LD HL, ($6440)  ;a pointer to sprite source
+$64F8 LD C, $04       ;sprite height. This code is modified by caller by changing value at $64F9 !
+$64FA LD B, $04       ;width of sprite. This code is modified by caller by changing value at $64FB !
+$64FC LD E, (HL)      ;get first byte of sprite cell
+      INC HL
+      LD D, (HL)      ;get second byte of sprite cell
+      INC HL
 ;; greatest idea!!! instead of EX (SP),HL  use LDI!!!
-6500: EX (SP), HL     ;exchange source and destination pointers
-6501: LD (HL), E      ;put first byte of sprite
-6502: INC HL
-6503: LD (HL), D      ;put second byte of sprite
-6504: INC HL
-6505: EX (SP), HL
-6506: DJNZ $64FC
-6508: EX (SP), HL
-6509: LD DE, $0038    ;move to next row of screen cell area
-650C: ADD HL, DE
-650D: EX (SP), HL
-650E: DEC C
-650F: JR NZ, $64FA
-6511: POP HL
-6512: RET
+      EX (SP), HL     ;exchange source and destination pointers
+      LD (HL), E      ;put first byte of sprite
+      INC HL
+      LD (HL), D      ;put second byte of sprite
+      INC HL
+      EX (SP), HL
+$6506 DJNZ $64FC      ;end of inner loop
+      EX (SP), HL
+      LD DE, $0038    ;move to next row of screen cell area. This value is modified by callers
+      ADD HL, DE
+      EX (SP), HL
+      DEC C
+$650F JR NZ, $64FA    ;outer loop
+      POP HL
+$6512 RET
+
+; $6513   ?? counter of remaining jumping frames ??
+; $6514   player's offset on screen, 2 bytes
+; $6516   player's current sprite code, 2 bytes. Possible values are: [$0A - $13]
+; $6518   buffer (4*4=16 bytes) where screen/level backround is stored, so player is drawn over it
 
 
-68F4: PUSH HL
-68F5: PUSH BC
-68F6: CALL $6409
-68F9: POP BC
-68FA: POP HL
-68FB: RET
+;
+; player has jumped, set new current sprite code
+;
+$662B LD A, ($6516)   ; player's current sprite code;
+      CP $0D          ; check if facing left or right
+      JR NC, $6636    ; go if right
+      LD A, $0B       ; set "jumping facing left" sprite code
+      JR $6638
+$6636 LD A, $0E       ; set "jumping facing right" sprite code
+$6638 LD ($6516), A   ; set new current sprite code for player
+$663B RET
 
-68FC: PUSH HL
-68FD: PUSH BC
-68FE: CALL $64F1
-6901: POP BC
-6902: POP HL
-6903: RET
+;handling of "up" key pressed
+$663C LD A, ($6648)     ;check "on rope" status
+      CP $01
+      JP NZ, $6698      ;go if not
+$6644 JP $66AC          ;go if on rope
 
+; $6647 - 1 byte, horizontal offset from block grid
+; $6648 - 1 byte, status "on rope"
+; $6649 ?
+; $664A ?
 
+;climbing up
+;here we will move visible view of screen, and check if block boundary is crossed
+$664B LD A, ($6629)       ;vertical offset of visible screen
+      DEC A               ;reduce
+      LD ($6629), A       ;store back
+      CALL $682C          ;flip low bit of player's current sprite
+      LD A, $01
+      LD ($68E0), A       ;??
+      LD HL, ($638F)      ;pointer to top-left visible cell of encoded screen
+      LD DE, $0040        ;this offset should be subsctracted to make top-left visible cell to go 1 position up
+      AND A
+      SBC HL, DE          ;substract, thus moving visible view up
+      LD ($638F), HL      ;store back
+      LD A, ($662A)       ;vertical offset of player relative to block grid
+      DEC A               ;decrement
+      LD ($662A), A       ;store back
+      CP $FF              ;check if it was 0 before
+      JR Z, $6680         ;go if yes, handle crossing block boundary
+$6671 RET
+;player have just moved via block boundary up
+;we should re-generate screen view based on new block coordinates, but move visible vew 5 rows low from block grid
+$6672 CALL $6460         ;generate encoded representation of visible screen
+      LD HL, ($638F)     ;pointer to top-left cell of visible screen
+      LD DE, $0140       ;add this value, so visible area is moved 5 rows below
+      ADD HL, DE
+      LD ($638F), HL     ;store back
+$667F RET
+;move player up on rope via block boundary
+$6680 LD A, $04          ;since blocks are 5-cells high, if we have just crossed a block boundary, then vertical offset will be 4
+      LD ($662A), A      ;vertical offset from block grid
+      LD A, ($664A)      ;vertical block coordinate of player
+      DEC A              ;decrement
+      LD ($664A), A      ;store back
+      CALL $6672         ;re-generate visible screen and move view lower from block grid
+      LD A, ($65BC)      ;BCD-displayable player vertical coordinate
+      DEC A              ;decrement
+      DAA                ;BCD-correction
+      LD ($65BC), A      ;store back
+$6697 RET
+;handle "jumping"
+$6698 LD A, $03          ;?? initial value of how many jumping frames ??
+      LD ($6513), A      ;?? set jumping frames ??
+      CALL $662B         ;set new sprite "jumping"
+      LD HL, $0214       ;new location of player's sprite on a screen
+      LD ($6514), HL
+      LD A, $01
+      LD ($68E0), A      ;?
+$66AB RET
+;handle "climbing"
+$66AC LD A, ($6647)     ;horizontal offset from grid
+      AND A             ;check if 0
+      RET NZ            ;exit if not 0, only 0 is ok value for player on rope
+      LD A, ($662A)     ;vertical offset of player from block grid
+      AND A             ;check if 0
+      JR NZ, $66C8      ;if not 0, then player is on rope, and can climb up, go to handle it
+;we get here if player is on rope, but is aligned on block grid. We much check if he can move up
+      LD DE, ($6649)    ;block-coordinates of player, reg D - vertical coord, reg E - horizontal coord
+      DEC D             ; we will check block above
+      CALL $61EA        ; get block code
+      AND A             ; check if empty
+      JR Z, $66C8
+      CP $04            ;check if rope
+      RET C
+      CP $07
+      RET NC
+$66C8 CALL $664B        ;move up on rope
+$66CB RET
 
-696D: LD A, ($68E8)
-6970: LD B, A
-6971: LD HL, $BF68
-6974: CALL $697B
-6977: JR NC, $69D7
-6979: JR $69A4
-697B: LD E, (HL)
-697C: INC HL
-697D: LD D, (HL)
-697E: INC HL
-697F: LD A, ($6629)
-6982: SUB $08
-6984: LD C, A
-6985: LD A, D
-6986: SUB C
-6987: LD D, A
-6988: CP $16
-698A: RET NC
-698B: LD A, ($6628)
-698E: SUB $0A
-6990: LD C, A
-6991: LD A, E
-6992: SUB C
-6993: LD E, A
-6994: CP $1A
-6996: RET NC
-6997: XOR A
-6998: SRL D
-699A: RRA
-699B: SRL D
-699D: RRA
-699E: SLA E
-69A0: ADD A, E
-69A1: LD E, A
-69A2: SCF
-69A3: RET
-69A4: PUSH HL
-69A5: LD HL, ($638F)
-69A8: ADD HL, DE
-69A9: LD ($643C), HL
-69AC: POP HL
-69AD: INC HL
-69AE: LD ($6436), HL
-69B1: DEC HL
-69B2: PUSH HL
-69B3: LD A, (HL)
-69B4: AND $03
-69B6: LD E, A
-69B7: LD D, $00
-69B9: SLA E
-69BB: LD HL, $6140
-69BE: ADD HL, DE
-69BF: LD ($643A), HL
-69C2: POP HL
-69C3: LD A, $01
-69C5: LD ($6411), A
-69C8: INC A
-69C9: LD ($6413), A
-69CC: CALL $68F4
-69CF: LD A, $04
-69D1: LD ($6411), A
-69D4: LD ($6413), A
-69D7: INC HL
-69D8: INC HL
-69D9: INC HL
-69DA: INC HL
-69DB: INC HL
-69DC: INC HL
-69DD: INC HL
-69DE: DJNZ $6974
-69E0: RET
+;climbing down
+$66CC LD A, ($6629)     ;vertical offset of visible screen
+      INC A             ;increment
+      LD ($6629), A     ;store back
+      CALL $682C        ;flip low bit of player's current sprite code, making a 2-frame animation sequence
+      LD A, $01
+      LD ($68E0), A     ;?
+      LD HL, ($638F)    ;top-left cell of visible screen
+      LD DE, $0040      ;offset to move 1 row down
+      ADD HL, DE        ;add offset, so making a scroll down
+      LD ($638F), HL    ;store back new value of top-left cell
+      LD A, ($662A)     ;;vertical offset of player from block grid
+      INC A             ;increment
+      LD ($662A), A     ;store back
+      CP $05            ;check if we became aligned with block grid
+      JR Z, $6701       ;go if yes, we have crossed block grid boundary
+$66F0 RET
+;sub-proc to re-encode a new screen buffer, and move view to top-left
+$66F1 CALL $6460        ;encode a visible screen
+      LD HL, ($638F)    ;top-left cell
+      LD DE, $0140      ;this value will be substracted, so scrolled screen view will to back to top of screen buffer
+      AND A             ;reset CF
+      SBC HL, DE        
+      LD ($638F), HL    ;store back top-left cell
+$6700 RET
+;continuation of proc, handling of crossing a block grid boundary situation
+$6701 XOR A
+      LD ($662A), A    ;reset relative vertical coordinate
+      LD A, ($664A)    ;vertical block coordinate of player
+      INC A            ;increment
+      LD ($664A), A    ;store back
+      CALL $66F1       ;re-encode a new screen buffer, and move view to top-left
+      LD A, ($65BC)    ;displayable vertical block-coordinate, in BCD
+      INC A            ;increment
+      DAA              ;BCD-correction
+      LD ($65BC), A    ;store bacck
+$6717 RET
+;
+; Handle "down" key
+;
+$6718 LD A, ($6647)     ;horizontal offset from block grid
+      AND A             ;check if 0
+      RET NZ            ;exit if not 0, since 0 is the only way player could be on rope
+      LD A, ($662A)     ; check if on rope and shifted vertically against grid
+      AND A
+      JR NZ, $6731      ; if yes, then will climb down
+;otherwise player is aligned with block grid, so we must check if he can climb down
+      LD DE, ($6649)    ; block-coordinates of player (center of a screen), reg D - vertical coord, reg E - horizontal coord
+      INC D             ; we will check block below player
+      CALL $61EA        ; get block code
+      CP $04            ; check if it is a rope
+      RET C
+      CP $07
+      RET NC
+      CALL $66CC        ;handle climbing down
+$6734 RET
 
+;move left or jump left
+$6735 LD A, ($6648)     ;check "on rope" status ?
+      AND A
+      JR Z, $6759
+;player is jumping left from rope to ground
+$673B LD A, $03         ;initial value for jumping frames
+      LD ($6513), A     ;jumping frame counter
+      LD A, $01         ; 1 means jumping left 
+      LD ($68DF), A     ;set jumping direction
+      LD HL, $0214      ;location of player on screen
+      LD ($6514), HL
+      LD A, $0B         ;sprite code for player jumping left
+      LD ($6516), A     ;set new sprite code
+      LD A, $01
+      LD ($68E0), A     ;??
+      XOR A
+6756: LD ($6648), A     ;remove "on rope" status??
 
-;draw 1x2 cell monster: droplet, hedgehog
-69E1: LD A, ($68E8)  ; example value: $28, number of monsters/hazards ?
-69E4: LD B, A
-69E5: LD HL, $C0C7
-69E8: LD E, (HL)     ; example value: $5A, coordinate?
-69E9: INC HL
-69EA: LD D, (HL)     ; example value: $3B, coordinate?
-69EB: INC HL
-69EC: LD A, ($6629)  ; example value: $72, screen offset?
-69EF: SUB $08
-69F1: LD C, A
-69F2: LD A, D
-69F3: SUB C
-69F4: LD D, A        ; example value: $D1
-69F5: CP $16
-69F7: JR NC, $6A33
-69F9: LD A, ($6628)  ;screen offset ?
-69FC: SUB $0A
-69FE: LD C, A
-69FF: LD A, E
-6A00: SUB C
-6A01: LD E, A
-6A02: CP $1A
-6A04: JR NC, $6A33
-6A06: XOR A          ;example value in DE: $0913
-6A07: SRL D
-6A09: RRA
-6A0A: SRL D
-6A0C: RRA
-6A0D: SLA E
-6A0F: ADD A, E
-6A10: LD E, A       ;example value in DE: $0266
-6A11: PUSH HL
-6A12: LD HL, ($638F)  ;example value: $EE44
-6A15: ADD HL, DE      
-6A16: LD ($643E), HL  ;sprite destination in cells area, param for proc $64F1
-6A19: POP HL
-6A1A: INC HL
-6A1B: LD ($6440), HL  ;sprite source, param for proc $64F1
-6A1E: DEC HL
-6A1F: LD A, $01
-6A21: LD ($64F9), A ;modify code in proc $64F1, sprite size
-6A24: INC A
-6A25: LD ($64FB), A ;modify code in proc $64F1, sprite size
-6A28: CALL $68FC    ;call a proc which then will call $64F1
-6A2B: LD A, $04
-6A2D: LD ($64F9), A ;restore default sprite size
-6A30: LD ($64FB), A
-6A33: INC HL
-6A34: INC HL
-6A35: INC HL
-6A36: INC HL
-6A37: INC HL
-6A38: INC HL
-6A39: INC HL
-6A3A: LD DE, $0012
-6A3D: AND A
-6A3E: SBC HL, DE
-6A40: DJNZ $69E8
-6A42: RET
+;moving/jumping left
+$6759 LD A, ($6628)     ;horizontal offset of visible screen ?	
+      DEC A             ;decrement, so scroll left
+      LD ($6628), A     ;store back
+      LD A, $01
+      LD ($68E0), A     ;?? 
+      LD A, ($68DF)     ;check jumping direction
+      CP $01            ;check if "jumping left", this means we are jumping
+      JR Z, $676F       ;if jumping, we don't need to animate/change player's sprite, so skip it
+      CALL $67EA        ;animate one frame of walking left (set new sprite code)
+$676F LD HL, ($638F)    ;top-left cell of visible screen
+      DEC HL            ;decrement twice, since each cell is 2-byte
+      DEC HL
+      LD ($638F), HL    ;store back
+      LD A, ($6647)     ;horizontal offset from block grid
+      DEC A             ;decrement
+      LD ($6647), A     ;store back
+      CP $FF            ;check if it became less than 0, meaning we crossed block grid
+      JR Z, $6791
+$6782 RET
 
+;if crossed block grid from left to right, we need to recalc encoded screen from blocks,
+;and also move visible view 4 cells right of origin
+$6783 CALL $6460        ;encode visible screen
+      LD HL, ($638F)    ;offset of visible top-left cell
+      LD DE, $0008      ;will move 4 cells to right from origin
+      ADD HL, DE
+      LD ($638F), HL    ;store back
+$6790 RET
 
-
-6BBF: LD A, ($68E9)
-6BC2: LD B, A
-6BC3: LD HL, $C184
-6BC6: CALL $697B
-6BC9: JR NC, $6BFE
-6BCB: PUSH HL
-6BCC: LD HL, ($638F)
-6BCF: ADD HL, DE
-6BD0: LD ($643C), HL
-6BD3: POP HL
-6BD4: INC HL
-6BD5: LD ($6436), HL
-6BD8: DEC HL
-6BD9: PUSH HL
-6BDA: LD A, (HL)
-6BDB: AND $07
-6BDD: LD E, A
-6BDE: LD D, $00
-6BE0: SLA E
-6BE2: LD HL, $8148
-6BE5: ADD HL, DE
-6BE6: LD ($643A), HL
-6BE9: POP HL
-6BEA: LD A, $01
-6BEC: LD ($6411), A
-6BEF: INC A
-6BF0: LD ($6413), A
-6BF3: CALL $68F4
-6BF6: LD A, $04
-6BF8: LD ($6411), A
-6BFB: LD ($6413), A
-6BFE: INC HL
-6BFF: INC HL
-6C00: INC HL
-6C01: INC HL
-6C02: INC HL
-6C03: INC HL
-6C04: INC HL
-6C05: DJNZ $6BC6
-6C07: RET
-
-
-
-;draw 3x4 cell monster: ghost, skeleton
-6CB1: LD A, ($68E7)  ; number of monsters, example value $0A
-6CB4: LD B, A
-6CB5: LD HL, $BD07
-6CB8: CALL $6D08     ;result: carry flag
-6CBB: JR NC, $6CEA   ; skip monster if he is not visible?
-6CBD: PUSH HL
-6CBE: LD HL, ($638F) ;screen offset ??
-6CC1: PUSH DE
-6CC2: LD DE, $00C2
-6CC5: AND A
-6CC6: SBC HL, DE
-6CC8: POP DE
-6CC9: ADD HL, DE
-6CCA: LD ($643E), HL ;sprite destination in cells area, param for proc $64F1
-6CCD: POP HL
-6CCE: INC HL
-6CCF: LD ($6440), HL ;sprite source
-6CD2: DEC HL
-6CD3: LD A, $03      ;sprite size
-6CD5: LD ($64FB), A
-6CD8: LD A, $3A      ;modify code in $64F1, how many bytes to add to move to next row of screen cells
-6CDA: LD ($650A), A
-6CDD: CALL $68FC
-6CE0: LD A, $04      ;restore default sprite size
-6CE2: LD ($64FB), A
-6CE5: LD A, $38      ;restore default value
-6CE7: LD ($650A), A
-6CEA: INC HL
-6CEB: INC HL
-6CEC: INC HL
-6CED: INC HL
-6CEE: INC HL
-6CEF: INC HL
-6CF0: INC HL
-6CF1: LD DE, $0026
-6CF4: AND A
-6CF5: SBC HL, DE
-6CF7: DJNZ $6CB8
-6CF9: RET
-
-;input: reg HL
-;output: reg DE, flag CF, reg HL
-6D08: LD E, (HL)
-6D09: INC HL
-6D0A: LD D, (HL)
-6D0B: INC HL
-6D0C: LD A, ($6629)
-6D0F: SUB $0B
-6D11: LD C, A
-6D12: LD A, D
-6D13: SUB C
-6D14: LD D, A
-6D15: CP $19
-6D17: RET NC
-6D18: LD A, ($6628)
-6D1B: SUB $0B
-6D1D: LD C, A
-6D1E: LD A, E
-6D1F: SUB C
-6D20: LD E, A
-6D21: CP $1B
-6D23: RET NC
-6D24: XOR A
-6D25: SRL D
-6D27: RRA
-6D28: SRL D
-6D2A: RRA
-6D2B: SLA E
-6D2D: ADD A, E
-6D2E: LD E, A
-6D2F: SCF
-6D30: RET
+;just crossed block grid from right to left
+$6791 LD A, $03         ;set new horizontal offset from block grid
+      LD ($6647), A
+      LD A, ($6649)     ;horizontal block coordinate of a player
+      DEC A             ;decrement
+      LD ($6649), A     ;store back
+      CALL $6783        ;recalc encoded visible screen, and set view 4-cells to the left of origin
+$67A0 RET
 
 
-78A5: CALL $9203
-78A8: CALL $696D
-78AB: CALL $6BBF
-78AE: CALL $6CFA
+;move left
+$67A1 LD A, ($6516)     ;player's current sprite code
+      CP $0D            ;check if left-facing
+      JR C, $67BA       ;go if yes
+      CP $10            ;check if on rope
+      JR NC, $67B2      ;go if yes
+      LD A, $0A         ;if we are here, then player is standing right-facing, make him left-facing
+$67AE LD ($6516), A     ;set new sprite code
+$67B1 RET
+$67B2 CP $12            ;check if player is on rope right-facing
+      JR NC, $67BA      ;go if yes
+      LD A, $12         ;if player is left-facing/right-body, then make him right-facing/left-body
+      JR $67AE          ;go to set new sprite code
+$67BA LD A, ($662A)     ;vertical offset of player from block grid
+      AND A             ;check if 0
+      RET NZ            ;exit if 0
+$67BF LD A, ($6647)     ;horizontal offset from block grid
+      AND A             ;check if 0
+      JR NZ, $67E6      ;go if no
+      LD DE, ($6649)    ;block coordinates of player, reg D - vertical, reg E - horizontal
+      DEC E             ;we will check block to the left of player
+      CALL $61EA        ;get code of block
+      AND A             ;check if 0
+      JR Z, $67D6       ;go if yes
+      CP $04            ;check if rope
+      RET C             ;exit if no
+      CP $07            ;again check if rope
+      RET NC            ;exit if no
+$67D6 LD DE, ($6649)    ;get block coordinates of a player
+      DEC E             ;make it 1 block position to the left
+      INC D             ;make it 1 block position down
+      CALL $61EA        ;get block coordinate
+      CP $04            ;check if rope
+      LD A, $04
+      JP NC, $673D      ;?? jump on rope ??
+$67E6 CALL $6735        ;walk/jump to left
+$67E9 RET
+
+;"walking left", animate one frame. There are 3 sprites, 1 for standing, which is a mid-part of animation
+;so animation sequence is 1-2-1-3-1-2-1-3
+$67EA LD A, ($6516)     ;player's current sprite code
+      CP $0A            ;check if standing facing left
+      JR Z, $67F5       ;go if yes
+      LD A, $0A         ;if no (meaning player's current sprite is stepping), then set standing code
+      JR $6802
+$67F5 LD A, ($6647)     ;horizontal offset from block grid
+      BIT 1, A          ;check lower bit
+      JR Z, $6800       ;depending on it, set one of stepping sprite codes
+      LD A, $0B         ;one of two possible stepping sprite codes
+      JR $6802
+$6800 LD A, $0C         ;another of two possible stepping sprite codes
+$6802 LD ($6516), A     ;store new sprite code
+$6805 RET
+
+
+6806: LD A, ($6648)     ;? value is 0 if just turned right
+6809: AND A
+680A: JR Z, $6835
+680C: LD A, $03         ; initial value for jumping frames 
+680E: LD ($6513), A     ;set jumping frame counter
+6811: LD A, $02         ;2 means jumping right
+6813: LD ($68DF), A     ;set jumping direction
+6816: LD HL, $0214
+6819: LD ($6514), HL
+681C: LD A, $0E
+681E: LD ($6516), A
+6821: LD A, $01
+6823: LD ($68E0), A
+6826: XOR A
+6827: LD ($6648), A
+682A: JR $6835           ;move/jump right
+
+;flip low bit of player's current sprite
+;
+$682C LD A, ($6516)
+      XOR $01
+      LD ($6516), A
+$6834 RET
+
+;walking/jumping right: screen scroll, player animation
+;
+$6835 LD A, ($6628)      ;horizontal offset of visible screen
+      INC A              ;increment
+      LD ($6628), A      ;store back
+      LD A, $01 
+      LD ($68E0), A      ;?
+      LD HL, ($638F)     ;pointer to top-left cell of encoded screen area
+      INC HL             ;increment twice, since each cell is 2-byte, thus moving visible area to right
+      INC HL
+      LD ($638F), HL     ;store back
+      LD A, ($68DF)      ;check if player is jumping right, 0 for walking, 2 for jumping right (1 for jumping left, but we don't expect it)
+      CP $02             ;check if jumping right
+      JR Z, $6853        ;if jumping, we don't need to change player's sprite, so skip it
+      CALL $68C3         ;player walkes right, set new sprite for player for walking animation
+$6853 LD A, ($6647)      ;? horizontal offset from block grid ?
+      INC A              ;increment
+      LD ($6647), A      ;store back
+      CP $04             ;check if we hit this limit
+      JR Z, $686F
+$685E RET
+$685F CALL $6460         ;if hit a limit, re-generate encoded screen representation
+      LD HL, ($638F)     ;offset of top-left cell of screen
+      LD DE, $0008       ;this value will be subtracted, so we move 4 cells to the left, to origin
+      AND A
+      SBC HL, DE
+      LD ($638F), HL     ;store back
+$686E RET
+
+
+;handler for "right" button
+;
+$687E LD A, ($6516)     ;player's current sprite code
+      CP $0D            ;check if it is left-facing sprite
+      JR NC, $688B      ;go if no
+      LD A, $0D         ;if left-facing, change to right-facing
+$6887 LD ($6516), A     ;store new sprite code
+      RET               ;and exit
+$688B CP $12            ;check if it is a left-facing rope hanging
+      JR C, $6893       ;go if no
+      LD A, $10         ;set to right-facing
+      JR $6887          ;go to set it a new current sprite
+$6893 LD A, ($662A)     ;check if shifted vertically from block grid (on rope)
+      AND A
+      RET NZ            ;do nothing if shifted, since left-right rotation on rope was already handled above
+$6898 LD A, ($6647)     ;check horizontal offset from block grid?
+      AND A
+      JR NZ, $68BF      ;go if not
+      LD DE, ($6649)    ;block coordinates of player, reg D - vertical coord, reg E - horizontal coord
+      INC E             ;increment horizontal coord
+      CALL $61EA        ;get code of a block (to the right of a player)
+      AND A             ;check if empty
+      JR Z, $68AF       ;go if yes
+      CP $04            ;check if rope
+      RET C             ;exit if no
+      CP $07            ;again check if rope
+      RET NC            ;exit if no
+$68AF LD DE, ($6649)    ;again block coordinates of player, reg D - vertical coord, reg E - horizontal coord
+      INC E             ;increment horizontal coord
+      INC D             ;increment vertical coord
+      CALL $61EA        ;get block 
+      CP $04            ;check if rope
+      LD A, $04         ;? some code for jumping to the right ?
+      JP NC, $680E      ;go if yes (jump on rope)
+$68BF CALL $6806
+$68C2 RET
+
+;set next sprite code for walking right
+;if sprite code is "stepping", then set "standing" code
+;is sprite code is "standing", select one of two "stepping" sprite codes
+$68C3 LD A, ($6516)     ;player's current sprite code
+      CP $0D            ;check if right-facing standing (not stepping)
+      JR Z, $68CE       ;go if standing
+68CA: LD A, $0D         ;sprite code for standing
+      JR $68DB          ;go and set "standing" as a new sprite code
+$68CE LD A, ($6647)     ;? horizontal offset from block grid ?
+      BIT 1, A          ;depending on this bit we will set one of two stepping sprites
+      JR Z, $68D9
+      LD A, $0E         ;first stepping sprite code
+      JR $68DB
+$68D9 LD A, $0F         ;second stepping sprite code
+$68DB LD ($6516), A     ;set new sprite code
+$68DE RET
+
+
+;
+;a small wrapper around $6409 which preserves HL and BC
+;
+$68F4 PUSH HL
+      PUSH BC
+$68F6 CALL $6409
+      POP BC
+      POP HL
+$68FB RET
+;
+;a small wrapper around $64F1 which preserves HL and BC
+;
+$68FC PUSH HL
+      PUSH BC
+$68FE CALL $64F1
+      POP BC
+      POP HL
+$6903 RET
+
+
+;
+;Draw a hedgehog, with copying content from screen into buffer
+;
+$696D LD A, ($68E8)   ; number of monsters/hazards
+      LD B, A         ; will b used as loop counter
+      LD HL, $BF68    ; start of list of monster info structures
+$6974 CALL $697B      ; check if visible
+      JR NC, $69D7    ; skip this monster if it is not visible
+$6979 JR $69A4        ; draw a monster if it is visible
+
+;sub-proc which will check if monster is visible
+$697B LD E, (HL)      ; horizontal coord
+      INC HL
+      LD D, (HL)      ; vertical coord
+      INC HL
+      LD A, ($6629)   ; vertical offset of visible screen
+      SUB $08         ; adjust
+      LD C, A
+      LD A, D
+      SUB C
+      LD D, A         ; now reg D contains on-screen vertical coord
+      CP $16          ; check if this coord is visible
+      RET NC          ; exit of no
+      LD A, ($6628)   ; horizontal offset of visible screen
+      SUB $0A         ; adjust
+      LD C, A
+      LD A, E
+      SUB C
+      LD E, A         ; now reg E contains on-screen horizontal coord
+      CP $1A          ; check if it is visible
+      RET NC          ; exit if no
+      XOR A
+      SRL D
+      RRA
+      SRL D
+      RRA
+      SLA E
+      ADD A, E
+      LD E, A         ; now DE contain offset of sprite on encoded screen
+      SCF             ; carry flag indicates that sprite is visible
+      RET             
+;end of sub-proc
+;back to outer proc, this part will copy sprite cell codes into encoded screen area
+$69A4 PUSH HL         
+      LD HL, ($638F)  ; address of top-left corner of encoded screen area
+      ADD HL, DE      ; add offset
+      LD ($643C), HL  ; param for $6409, destination for a sprite
+      POP HL          
+      INC HL          ; HL points to +3 field of monster structure
+      LD ($6436), HL  ; param for $6409, buffer where screen content will be stored
+      DEC HL          ; HL points to +2 field of monster structure
+      PUSH HL        
+      LD A, (HL)      ; load monster animation step (sprite code)
+      AND $03         ; leave only 2 bits
+      LD E, A
+      LD D, $00
+      SLA E           ; multiply by 2, it will make an offset
+      LD HL, $6140    ; that is a sprite base
+      ADD HL, DE      ; add offset, now HL points to monster sprite initial cell code
+      LD ($643A), HL  ; param for $6409, source of a sprite
+      POP HL
+      LD A, $01       ; height of a sprite
+      LD ($6411), A   ; modify code of $6409
+      INC A           ; width of a sprite
+      LD ($6413), A   ; modify code of $6409
+      CALL $68F4      ; call $$68F4, which will call $6409
+      LD A, $04       
+      LD ($6411), A   ; restore code of $6409
+      LD ($6413), A   ; restore code of $6409
+$69D7 INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      DJNZ $6974       ;next loop
+$69E0 RET
+
+;
+;restore screen content from temp buffers for hedgehogs
+;
+$69E1 LD A, ($68E8)  ; example value: $28, number of monsters/hazards ?
+      LD B, A        ; it will work as a loop counter
+      LD HL, $C0C7
+$69E8 LD E, (HL)     ; example value: $5A, coordinate?
+      INC HL
+      LD D, (HL)     ; example value: $3B, coordinate?
+      INC HL
+;looks like following code checks if monster is currently visible
+;and also calculates on-screen coordinates
+      LD A, ($6629)  ; example value: $72, screen offset?
+      SUB $08
+      LD C, A
+      LD A, D
+      SUB C
+      LD D, A        ; example value: $D1
+      CP $16
+      JR NC, $6A33
+      LD A, ($6628)  ;screen offset ?
+      SUB $0A
+      LD C, A
+      LD A, E
+      SUB C
+      LD E, A
+      CP $1A
+      JR NC, $6A33
+
+;calculate offset in encoded screen based on on-screen coordinates in D and E
+      XOR A          ;example value in DE: $0913
+      SRL D
+      RRA
+      SRL D
+      RRA
+      SLA E
+      ADD A, E
+      LD E, A       ;example value in DE: $0266
+
+      PUSH HL
+      LD HL, ($638F)  ;address of visible top-left cell of encoded screen
+      ADD HL, DE      ;add offset, this makes HL to be address in encoded screen area
+      LD ($643E), HL  ;sprite destination in cells area, param for proc $64F1
+      POP HL
+      INC HL
+      LD ($6440), HL  ;sprite source, param for proc $64F1
+      DEC HL
+      LD A, $01
+$6A21 LD ($64F9), A ;modify code in proc $64F1, sprite size
+      INC A
+$6A25 LD ($64FB), A ;modify code in proc $64F1, sprite size
+$6A28 CALL $68FC    ;call a proc which then will call $64F1
+      LD A, $04
+      LD ($64F9), A ;restore default sprite size
+      LD ($64FB), A
+$6A33 INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+$6A3A LD DE, $0012
+      AND A
+      SBC HL, DE
+$6A40 DJNZ $69E8
+$6A42 RET
+
+; draw droplets
+$6BBF LD A, ($68E9)   ; number of items in list
+      LD B, A         ; will be a loop counter
+      LD HL, $C184    ; base of a list
+$6BC6 CALL $697B      ; get screen offset, and check if it is visible
+      JR NC, $6BFE    ; skip if not visible
+      PUSH HL         ; store HL, it contains item base + 2
+      LD HL, ($638F)  ; screen base
+      ADD HL, DE      ; add offset
+      LD ($643C), HL  ; destination in screen area, param for $6409
+      POP HL          ; restore HL, it contains item base + 2
+      INC HL
+      LD ($6436), HL  ; item base + 3, will be used as a buffer to store screen data, param for $6409
+      DEC HL          ; item base + 2
+      PUSH HL
+      LD A, (HL)      ; value at item base + 2 is a sprite code
+      AND $07         ; keep only 3 bits
+      LD E, A
+      LD D, $00
+      SLA E           ; multiply by 2, this makes DE as offset
+      LD HL, $8148    ; base of sprite cell codes
+      ADD HL, DE      ; add cell code offset
+      LD ($643A), HL  ; initial sprite cell code, param for $6409
+      POP HL
+      LD A, $01       ; modify code of $6409, sprite height
+      LD ($6411), A
+      INC A
+      LD ($6413), A   ; modify code of $6409, sprite width
+      CALL $68F4      ; copy screen content into a buffer, and draw a sprite based on initial cell code
+      LD A, $04
+      LD ($6411), A   ; restore original values for $6409
+      LD ($6413), A
+$6BFE INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      DJNZ $6BC6      ; move to next item
+$6C07 RET
+
+; restore prev screen content for droplets
+; This small piece of code is an alternative prologue for $69E1, and differs only with list size and list base
+$6C5C LD A,($68E9)   ;number of items in list, see $69E1
+      LD B,A
+      LD HL,$C22F    ;base of list, see $69E1
+$6C63 JP $69E8       ;jump into $69E1, return will be done from there
+
+
+;
+;restore backgrounds for ghosts
+;
+$6CB1 LD A, ($68E7)  ; number of monsters, example value $0A
+      LD B, A        ;it will be a loop counter
+      LD HL, $BD07   ;base of monster info list
+$6CB8 CALL $6D08     ;result: carry flag
+      JR NC, $6CEA   ; skip monster if he is not visible?
+      PUSH HL
+      LD HL, ($638F) ;base of visible encoded screen
+      PUSH DE
+      LD DE, $00C2
+      AND A
+      SBC HL, DE     ;some adjustment
+      POP DE         ;restore sprite offset
+      ADD HL, DE     ;add sprite offset to base
+      LD ($643E), HL ;sprite destination in cells area, param for proc $64F1
+      POP HL
+      INC HL
+      LD ($6440), HL ;sprite source
+      DEC HL
+      LD A, $03      ;sprite size
+      LD ($64FB), A
+      LD A, $3A      ;modify code in $64F1, how many bytes to add to move to next row of screen cells
+      LD ($650A), A
+      CALL $68FC
+      LD A, $04      ;restore default sprite size
+      LD ($64FB), A
+      LD A, $38      ;restore default value
+      LD ($650A), A
+$6CEA INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      INC HL
+      LD DE, $0026
+      AND A
+      SBC HL, DE
+      DJNZ $6CB8
+$6CF9 RET
+
+;
+; draw a ghost 
+;
+$6CFA LD A, ($68E7)  ;number of entries in a list
+      LD B, A        ;will be used as a counter
+      LD HL, $BC02   ;base of a list
+      CALL $6D08     ;check if visible (flag C), and also calculate screen buffer offset based on coordinates
+      JR NC, $6D72   ;skip drawing a sprite if list entry is not visible
+$6D06 JR $6D31       ;jump around sub-proc
+;sub-proc, called from several places
+;check if monster pointed by HL is visible. If yes, set carry flag, and return address offset for encoded screen area in DE
+;
+$6D08 LD E, (HL)     ;horizontal coord
+      INC HL
+      LD D, (HL)     ;vertical coord
+      INC HL
+      LD A, ($6629)  ;vertical screen offset
+      SUB $0B        ;adjust
+      LD C, A
+      LD A, D
+      SUB C
+      LD D, A        ;now D contains on-screen vertical coord
+      CP $19         ;check against screen height
+      RET NC         ;return if greater, so it is not visible
+      LD A, ($6628)  ;horizonal screen offset
+      SUB $0B        ;adjust
+      LD C, A
+      LD A, E
+      SUB C
+      LD E, A       ;now E contains on-screen horizontal coord
+      CP $1B        ;check against screen width
+      RET NC        ;return if not visible
+;now will calculate address offset for encoded screen area
+      XOR A
+      SRL D
+      RRA
+      SRL D
+      RRA
+      SLA E
+      ADD A, E
+      LD E, A
+      SCF          ;set carry flag to indicate that monster is visible
+$6D30 RET
+;end of sub-proc
+;continuation of ghost drawing proc
+$6D31 PUSH HL
+      LD HL, ($638F)
+      PUSH DE
+      LD DE, $00C2
+      AND A
+      SBC HL, DE     ; some adjustment
+      POP DE
+      ADD HL, DE     ; add sprite screen offset to obtain full screen buffer position
+      LD ($643C), HL ; sprite destination in encoded screen area, param for $6409
+      POP HL
+      INC HL
+      LD ($6436), HL ; buffer to store prev screen content
+      DEC HL
+      PUSH HL
+      LD A, (HL)     ; sprite code?
+      RLC A          ; *2
+      AND $03        ; keep only 2 lower bits
+      LD E, A
+      LD D, $00
+      CALL $6D7C     ; *12
+      LD HL, $E156
+      ADD HL, DE
+      LD ($643A), HL ; sprite source, initial cell code
+      POP HL
+      LD A, $03      ; modify code
+      LD ($6413), A
+      LD A, $3A      ; modify code
+      LD ($642E), A
+      CALL $68F4     ; draw
+      LD A, $38      ; restore code
+      LD ($642E), A
+      LD A, $04      ; restore code
+      LD ($6413), A
+      INC HL
+      INC HL
+      INC HL
+      LD DE, $0018
+      ADD HL, DE    ;move to next entry
+      DJNZ $6D01    ;loop
+$6D7B RET
+
+
+;multiply value in E by 12
+$6D7C PUSH BC
+      LD A, E
+      AND A
+      JR Z, $6D87
+      LD B, A
+      XOR A
+$6D83 ADD A, $0C
+      DJNZ $6D83
+$6D87 LD E, A
+      POP BC
+$6D89 RET
+
+
+
+
+
+
+6DF3: PUSH HL
+6DF4: LD HL, ($628D)
+6DF7: INC HL
+6DF8: LD ($628D), HL
+6DFB: LD A, (HL)
+6DFC: AND $0F
+6DFE: LD D, A
+6DFF: INC HL
+6E00: LD A, (HL)
+6E01: AND $1F
+6E03: LD E, A
+6E04: CALL $68EA
+6E07: JR C, $6DF4
+6E09: CALL $6BB7
+6E0C: JR NC, $6DF4
+6E0E: POP HL
+6E0F: LD (HL), E
+6E10: INC HL
+6E11: LD (HL), D
+6E12: INC HL
+6E13: LD A, D
+6E14: CALL $6454     ; multiply by 5  !!! TODO replace CALL with  [ ADD A,A  ADD A,A  ADD A,D]
+6E17: LD D, A
+6E18: SLA E
+6E1A: SLA E
+6E1C: LD (HL), E
+6E1D: INC HL
+6E1E: INC D
+6E1F: LD (HL), D
+6E20: INC HL
+6E21: PUSH HL
+6E22: LD HL, ($628D)
+6E25: INC HL
+6E26: LD ($628D), HL
+6E29: LD A, (HL)
+6E2A: AND $01
+6E2C: OR $10
+6E2E: POP HL
+6E2F: LD (HL), A
+6E30: AND $01
+6E32: CP $01
+6E34: JR NZ, $6E3A
+6E36: LD C, $80
+6E38: JR $6E3C
+6E3A: LD C, $20
+6E3C: DEC HL
+6E3D: DEC HL
+6E3E: DEC HL
+6E3F: DEC HL
+6E40: LD A, (HL)
+6E41: AND $1F
+6E43: OR C
+6E44: LD (HL), A
+6E45: INC HL
+6E46: LD DE, $001C
+6E49: ADD HL, DE
+6E4A: RET
+6E4B: DJNZ $6DED
+6E4D: RET
+
+
+; draw a mummy
+6E4E: LD A, ($6D91)
+6E51: LD B, A
+6E52: LD HL, $C3A0
+6E55: CALL $6D08
+6E58: JR NC, $6EA7
+6E5A: PUSH HL
+6E5B: LD HL, ($638F)
+6E5E: PUSH DE
+6E5F: LD DE, $00C2
+6E62: AND A
+6E63: SBC HL, DE
+6E65: POP DE
+6E66: ADD HL, DE
+6E67: LD ($643C), HL
+6E6A: POP HL
+6E6B: INC HL
+6E6C: LD ($6436), HL
+6E6F: DEC HL
+6E70: PUSH HL
+6E71: DEC HL
+6E72: DEC HL
+6E73: DEC HL
+6E74: DEC HL
+6E75: LD A, (HL)
+6E76: AND $E0
+6E78: SRL A
+6E7A: SRL A
+6E7C: SRL A
+6E7E: SRL A
+6E80: SRL A
+6E82: LD E, A
+6E83: LD D, $00
+6E85: CALL $6D7C
+6E88: LD HL, $E186
+6E8B: ADD HL, DE
+6E8C: LD ($643A), HL
+6E8F: POP HL
+6E90: LD A, $03
+6E92: LD ($6413), A
+6E95: LD A, $3A
+6E97: LD ($642E), A
+6E9A: CALL $68F4
+6E9D: LD A, $38
+6E9F: LD ($642E), A
+6EA2: LD A, $04
+6EA4: LD ($6413), A
+6EA7: INC HL
+6EA8: INC HL
+6EA9: INC HL
+6EAA: LD DE, $0018
+6EAD: ADD HL, DE
+6EAE: DJNZ $6E55
+6EB0: RET
+
+; draw a bat
+6F03: LD A, ($6D8D)
+6F06: LD B, A
+6F07: LD HL, $C706
+6F0A: CALL $6D94
+6F0D: JR NC, $6F57
+6F0F: PUSH HL
+6F10: LD HL, ($638F)
+6F13: PUSH DE
+6F14: LD DE, $0042
+6F17: AND A
+6F18: SBC HL, DE
+6F1A: POP DE
+6F1B: ADD HL, DE
+6F1C: LD ($643C), HL
+6F1F: POP HL
+6F20: INC HL
+6F21: LD ($6436), HL
+6F24: DEC HL
+6F25: PUSH HL
+6F26: LD A, (HL)
+6F27: RLC A
+6F29: AND $03
+6F2B: LD E, A
+6F2C: LD D, $00
+6F2E: CALL $6FAB
+6F31: LD HL, $61DA
+6F34: ADD HL, DE
+6F35: LD ($643A), HL
+6F38: POP HL
+6F39: LD A, $03
+6F3B: LD ($6413), A
+6F3E: DEC A
+6F3F: LD ($6411), A
+6F42: LD A, $3A
+6F44: LD ($642E), A
+6F47: CALL $68F4
+6F4A: LD A, $38
+6F4C: LD ($642E), A
+6F4F: LD A, $04
+6F51: LD ($6413), A
+6F54: LD ($6411), A
+6F57: INC HL
+6F58: LD DE, $000E
+6F5B: ADD HL, DE
+6F5C: DJNZ $6F0A
+6F5E: RET
+
+6F5F: LD A, ($6D8D)
+6F62: LD B, A
+6F63: LD HL, $C6F5
+6F66: CALL $6D94
+6F69: JR NC, $6FA1
+6F6B: PUSH HL
+6F6C: LD HL, ($638F)
+6F6F: PUSH DE
+6F70: LD DE, $0042
+6F73: AND A
+6F74: SBC HL, DE
+6F76: POP DE
+6F77: ADD HL, DE
+6F78: LD ($643E), HL
+6F7B: POP HL
+6F7C: INC HL
+6F7D: LD ($6440), HL
+6F80: DEC HL
+6F81: PUSH HL
+6F82: POP HL
+6F83: LD A, $03
+6F85: LD ($64FB), A
+6F88: DEC A
+6F89: LD ($64F9), A
+6F8C: LD A, $3A
+6F8E: LD ($650A), A
+6F91: CALL $68FC
+6F94: LD A, $38
+6F96: LD ($650A), A
+6F99: LD A, $04
+6F9B: LD ($64FB), A
+6F9E: LD ($64F9), A
+6FA1: INC HL
+6FA2: LD DE, $0014
+6FA5: AND A
+6FA6: SBC HL, DE
+6FA8: DJNZ $6F66
+6FAA: RET
+
+
+; draw a lizard
+7006: LD A, ($6D92)
+7009: LD B, A
+700A: LD HL, $C9AE
+700D: CALL $6DBD
+7010: JR NC, $7057
+7012: PUSH HL
+7013: LD HL, ($638F)
+7016: PUSH DE
+7017: LD DE, $003E
+701A: AND A
+701B: SBC HL, DE
+701D: POP DE
+701E: ADD HL, DE
+701F: LD ($643C), HL
+7022: POP HL
+7023: INC HL
+7024: LD ($6436), HL
+7027: DEC HL
+7028: PUSH HL
+7029: LD A, (HL)
+702A: AND $07
+702C: LD E, A
+702D: LD D, $00
+702F: SLA E
+7031: LD HL, $81F2
+7034: ADD HL, DE
+7035: LD ($643A), HL
+7038: POP HL
+7039: LD A, $01
+703B: LD ($6413), A
+703E: INC A
+703F: LD ($6411), A
+7042: LD A, $3E
+7044: LD ($642E), A
+7047: CALL $68F4
+704A: LD A, $38
+704C: LD ($642E), A
+704F: LD A, $04
+7051: LD ($6413), A
+7054: LD ($6411), A
+7057: INC HL
+7058: LD DE, $0006
+705B: ADD HL, DE
+705C: DJNZ $700D
+705E: RET
+
+
+
+;gaming loop
+
+
+$777D LD A, ($6513)      ;get counter of remaining jumping frames
+      AND A              ;check if player is jumping
+      JR NZ, $778B       ;go if yes, so jump is in progress
+      LD A, $00
+      LD ($68DF), A      ;otherwize, clean jump direction flag
+$7788 JP $77FE
+
+;handle "jump in progress" situation
+$778B LD A, ($68DF)      ;get jump direction var
+      AND A              ;check if 0
+      JR Z, $779D        ;go if yes (jumping up)
+      CP $01             ;check if 1 (jumping left)
+      JR NZ, $779A       ;go if no (jumping right)
+$7795 CALL $6759         ;jumping left, process one frame
+      JR $779D
+$779A CALL $6835         ;jumping right, process one frame
+$779D LD A, ($6513)      ;get counter of remaining jumping frames
+      DEC A              ;decrement
+      LD ($6513), A      ;store back
+      JP NZ, $77B5       ;go if still some frames remain
+;we get here if jump just has completed
+$77A7 LD HL, $AFFE       ;???
+      SET 5, (HL)
+      LD HL, $0254   
+      LD ($6514), HL     ;player offset on screen
+$77B2 JP $7879
+;we get here if player has still some jump frames remaining
+$77B5 CP $01             ;check if 1 jump frame remains
+      JP NZ, $789A
+;we should check if player is aligned on block grid, and that current block is "rope"
+;in such case we should make player to hold a rope
+      LD A, ($6647)     ;horizontal offset from block grid
+      AND A             ;check if 0
+      JP NZ, $789A      ;go if not 0
+;we get here if player is aligned in block grid
+      LD DE, ($6649)    ;player's block coordinates
+      CALL $61EA        ;get level block code
+      CP $07            ;check if it is a code for rope: $04-07
+      JP NC, $789A      ;go if not
+      CP $04            
+      JP C, $789A       ;go if not
+;we get here if player is jumping, and it is a last frame of jump, and player is aligned to block grid and current block is "rope"
+;we should make player hold a rope
+      LD A, $01
+      LD ($6648), A     ;status "on rope"
+      XOR A
+      LD ($6513), A     ;set jump frame to 0
+      LD ($68DF), A     ;set jump direction to 0
+      LD A, ($6516)     ;player's current sprite code
+      CP $0D            ;check if facing right/left
+      JR NC, $77E9      ;go if right
+      LD A, $10         ;new sprite code: on rope, facing left
+      JR $77EB
+$77E9 LD A, $12         ;new sprite code: on rope, facing right
+$77EB LD ($6516), A     ;set player's current sprite code
+$77EE JP $789A
+
+77F1: CALL $ADCE
+77F4: CALL $6569
+77F7: XOR A
+77F8: LD ($68E0), A
+77FB: JP $777D
+
+;
+;keyboard read and process
+;
+;check "up" key
+$77FE LD A, $FB
+      IN A, ($FE)
+      AND $01             ;check "Q" button
+      JR NZ, $7823        ;go if not pressed
+      CALL $663C
+7809: LD A, ($68E0)
+780C: AND A
+780D: JR Z, $7873
+780F: LD A, ($6513)
+7812: AND A
+7813: JR NZ, $781C
+7815: LD HL, $AFFE      ;state of keys?
+7818: SET 3, (HL)       ;bit 4 will represent "up" key?
+781A: JR $7873
+781C: LD HL, $AFFE      ;state of keys?
+781F: SET 4, (HL)       ;bit 4 will represent "down" key?
+7821: JR $7873
+
+;check "down" key
+$7823 LD A, $FD
+      IN A, ($FE)
+      AND $01           ;check "A" button
+      JR NZ, $7836
+      CALL $6718        ;handle "down" key
+      LD A, ($68E0)
+      AND A
+      JR NZ, $7815
+$7834 JR $7873
+
+;check "left" key
+$7836 LD A, $DF
+      IN A, ($FE)      
+      AND $02          ;check "O" button
+      JR NZ, $785F     ;skip if not pressed
+      CALL $67A1       ;handle "move left" key
+7841: LD A, ($68E0)
+7844: AND A
+7845: JR Z, $7873
+7847: LD A, ($6513)
+784A: AND A
+784B: JR NZ, $781C
+784D: LD HL, $AFFE
+7850: LD A, ($6516)   ;player's current sprite code
+7853: CP $0D
+7855: JR Z, $785B
+7857: CP $0A
+7859: JR NZ, $7873
+785B: SET 5, (HL)
+785D: JR $7873
+
+;check "right" key
+785F: LD A, $DF
+7861: IN A, ($FE)
+7863: AND $01        ;check "P" button
+7865: JR NZ, $7872
+7867: CALL $687E
+786A: LD A, ($68E0)
+786D: AND A
+786E: JR NZ, $7847
+7870: JR $7873
+
+7872: NOP
+7873: LD A, ($68E0)
+7876: AND A
+7877: JR NZ, $789A
+7879: LD A, ($6516)   ;player's current sprite code
+787C: CP $0D
+787E: JR NC, $7884
+7880: LD A, $0A
+7882: JR $7897
+7884: CP $10
+7886: JR C, $7895
+7888: CP $12
+788A: JP NC, $7891
+788D: LD A, $10
+788F: JR $7897
+7891: LD A, $12
+7893: JR $7897
+7895: LD A, $0D
+7897: LD ($6516), A    ;player's current sprite code
+
+789A: CALL $9269
+789D: LD A, $7F
+789F: IN A, ($FE)      ;read keys (half row "B"-BSPACE)
+78A1: AND $04          ;check key "M"
+78A3: JR NZ, $78A8     ;skip if not pressed
+78A5: CALL $9203       ;handle fire
+78A8: CALL $696D       ;draw hedgehogs
+78AB: CALL $6BBF       ;draw droplets
+78AE: CALL $6CFA       ;draw ghosts
 78B1: LD A, ($6D91)
 78B4: AND A
-78B5: CALL NZ, $6E4E
+78B5: CALL NZ, $6E4E   ;draw mummies
 78B8: LD A, ($6D8D)
 78BB: AND A
-78BC: CALL NZ, $6F03
+78BC: CALL NZ, $6F03   ;draw bats/vampires
 78BF: LD A, ($6D92)
 78C2: AND A
-78C3: CALL NZ, $7006
+78C3: CALL NZ, $7006   ;draw lizards
 78C6: LD A, ($6D8F)
 78C9: AND A
-78CA: CALL NZ, $8F6C
+78CA: CALL NZ, $8F6C   ;draw skeletons
+78CD: CALL $90D8
+78D0: CALL $8D51
+78D3: CALL $63DF       ;draw player
+78D6: CALL $AD49
+78D9: CALL $9366
+78DC: CALL $933B
+78DF: LD A, ($8CC0)
+78E2: AND A
+78E3: JR Z, $78EA
+78E5: CALL $8DE9       ;this point is called if player is hit by a monster
+78E8: JR $78F8
+78EA: CALL $8DEE
+78ED: CALL $6AEE
+78F0: JR NC, $78F8
+78F2: CALL $79C0
+78F5: JP C, $7BA2
+78F8: LD A, ($8CAB)
+78FB: AND A
+78FC: JR Z, $790A
+78FE: CALL $8CEF
+7901: XOR A
+7902: LD ($8CAB), A
+7905: LD HL, $AFFE
+7908: SET 2, (HL)
+790A: CALL $6391     ;main video/screen output
+790D: CALL $79EB
+7910: CALL $8E02
+7913: CALL $ADDE
+7916: CALL $AE2B
+7919: CALL $64E1     ;restore screen behind player
+791C: CALL $9137
+791F: LD A, ($6D8F)
+7922: AND A
+7923: CALL NZ, $8FB3
+7926: LD A, ($6D8F)
+7929: AND A
+792A: CALL NZ, $8E55
+792D: LD A, ($6D92)
+7930: AND A
+7931: CALL NZ, $705F
+7934: LD A, ($6D8D)
+7937: AND A
+7938: CALL NZ, $6F5F
+793B: LD A, ($6D91)
+793E: AND A
+793F: CALL NZ, $6EB1
+7942: LD A, ($6D91)
+7945: AND A
+7946: CALL NZ, $8D96
+7949: LD A, ($6D8D)
+794C: AND A
+794D: CALL NZ, $8EB7
+7950: CALL $6CB1   ; restore background for ghosts ?
+7953: CALL $6C5C   ; restore background for droplets ?
+7956: CALL $69E1   ; restore background for hedgehogs ?
+7959: LD A, ($8CBE)
+795C: AND A
+795D: CALL NZ, $9396
+7960: CALL $92DD
+7963: CALL $6A43
+7966: XOR A
+7967: LD ($8CBE), A
+796A: CALL $6C08
+796D: CALL $711A
+7970: LD A, ($6D91)
+7973: AND A
+7974: CALL NZ, $70A9
+7977: LD A, ($6D8D)
+797A: AND A
+797B: CALL NZ, $73AC
+797E: LD A, ($6D92)
+7981: AND A
+7982: CALL NZ, $72CB
+7985: LD A, ($6D8F)
+7988: AND A
+7989: CALL NZ, $8FE4
+798C: CALL $931D
+798F: LD A, ($6648)
+7992: AND A
+7993: JR Z, $79A5
+7995: LD DE, ($91FE)
+7999: LD HL, ($6649)
+799C: SBC HL, DE
+799E: LD A, L
+799F: OR H
+79A0: JR NZ, $79A5
+79A2: JP $7AC5
+79A5: CALL $91B1
+79A8: LD A, ($628E)
+79AB: AND $3F
+79AD: LD ($628E), A
+79B0: CALL $6538
+79B3: LD HL, $90D2
+79B6: LD DE, $65DB
+79B9: CALL $60D3
+79BC: JP $77F1             ; end of gaiming loop ?
+
+79BF: LD BC, $BF3A
+79C2: ADC A, H
+79C3: DEC A
+79C4: AND A
+79C5: JR NZ, $79C9
+79C7: SCF
+79C8: RET
+
+
+
+
+
+; draw skeletons
+8F6C: LD A, ($6D8F)
+8F6F: LD B, A
+8F70: LD HL, $CBCA
+8F73: CALL $8CC1
+8F76: JR NC, $8FAB
+8F78: PUSH HL
+8F79: LD HL, ($638F)
+8F7C: PUSH DE
+8F7D: LD DE, $00C4
+8F80: AND A
+8F81: SBC HL, DE
+8F83: POP DE
+8F84: ADD HL, DE
+8F85: LD ($643C), HL
+8F88: POP HL
+8F89: INC HL
+8F8A: INC HL
+8F8B: LD ($6436), HL
+8F8E: DEC HL
+8F8F: DEC HL
+8F90: PUSH HL
+8F91: INC HL
+8F92: LD A, (HL)
+8F93: AND $07
+8F95: LD E, A
+8F96: LD D, $00
+8F98: SLA E
+8F9A: SLA E
+8F9C: SLA E
+8F9E: SLA E
+8FA0: LD HL, $E202
+8FA3: ADD HL, DE
+8FA4: LD ($643A), HL
+8FA7: POP HL
+8FA8: CALL $68F4
+8FAB: INC HL
+8FAC: LD DE, $0023
+8FAF: ADD HL, DE
+8FB0: DJNZ $8F73
+8FB2: RET
+
+; restore prev screen content for skeleton
+8FB3: LD A, ($6D8F)
+8FB6: LD B, A
+8FB7: LD HL, $CC62
+8FBA: CALL $8CC1
+8FBD: JR NC, $8FDA
+8FBF: PUSH HL
+8FC0: LD HL, ($638F)
+8FC3: PUSH DE
+8FC4: LD DE, $00C4
+8FC7: AND A
+8FC8: SBC HL, DE
+8FCA: POP DE
+8FCB: ADD HL, DE
+8FCC: LD ($643E), HL
+8FCF: POP HL
+8FD0: INC HL
+8FD1: INC HL
+8FD2: LD ($6440), HL
+8FD5: DEC HL
+8FD6: DEC HL
+8FD7: CALL $68FC
+8FDA: INC HL
+8FDB: LD DE, $0029
+8FDE: AND A
+8FDF: SBC HL, DE
+8FE1: DJNZ $8FBA
+8FE3: RET
